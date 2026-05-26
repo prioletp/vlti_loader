@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0", "scipy>=1.14", "matplotlib>=3.9", "astropy>=6.1", "tqdm>=4.6"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vltiloader"
+version = "0.0.1"
+authors = [
+  { name="Philippe Priolet", email="philippeprioletm@gmail.com" },
+]
+description = "Package to load interferometric data into python data structures from '.fits' files"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
