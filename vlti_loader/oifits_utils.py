@@ -62,7 +62,127 @@ def read_header(fits_file_path, hdu_index=0, keywords=None):
     except Exception as e:
         raise RuntimeError(f"Error reading FITS header from {fits_file_path}: {str(e)}")
 
+def create_data_dic_PIONIER(hdul):
+        """
+        Creates a dictionary containing the oifits data with optimized processing.
+        
+        Parameters
+        ----------
+        hdul : HDUList
+            HDU list following the oifits format
+            
+        Returns
+        -------
+        data_dic : dict
+            Dictionary containing the interferometric data with keys:
+            - 'VIS2', 'VIS2_err': Squared visibility and errors
+            - 'VIS2_waves': Wavelengths for visibility data
+            - 'Bu', 'Bv': UV coordinates
+            - 'B', 'freqs': Baseline lengths and spatial frequencies
+            - 'Vis2_sta_idx_0/1', 'Vis2_tel_name_0/1': Station info
+            - 'TEL_type', 'Telescopes': Telescope information
+            - T3 data (if available): 'T3_PHI', 'T3_PHI_err', UV coords, etc.
+        """
+        import numpy as np
+        
+        # Get HDU content efficiently
+        hdul_content = [hdu.name for hdu in hdul]
+        data_dic = {}
+        # Extract basic data
+        header = hdul[0].header
+        wavelengths = hdul['OI_WAVELENGTH'].data['EFF_WAVE']
+        n_waves = len(wavelengths)
+        
+        # === VISIBILITY DATA PROCESSING ===
+        vis2_data = hdul['OI_VIS2'].data
+        V2 = vis2_data['VIS2DATA']
+        V2_err = vis2_data['VIS2ERR'] 
+        B_u = vis2_data['UCOORD']
+        B_v = vis2_data['VCOORD']
+        V2_sta_idx = vis2_data['STA_INDEX']
+        n_baselines = len(B_u)
 
+
+        # Vectorized data expansion (much faster than loops)
+        data_dic['VIS2'] = V2.ravel()
+        data_dic['VIS2_err'] = V2_err.ravel()
+        data_dic['VIS2_waves'] = np.tile(wavelengths, n_baselines)
+        data_dic['INS_VIS2'] = np.repeat('PIONIER', data_dic['VIS2'].shape[0])
+
+        # Expand baseline coordinates
+        data_dic['Bu'] = np.repeat(B_u, n_waves)
+        data_dic['Bv'] = np.repeat(B_v, n_waves)
+        data_dic['B'] = np.sqrt(data_dic['Bu']**2 + data_dic['Bv']**2)
+        data_dic['freqs'] = data_dic['B'] / data_dic['VIS2_waves']
+        data_dic['u'] = data_dic['Bu'] / data_dic['VIS2_waves']
+        data_dic['v'] = data_dic['Bv'] / data_dic['VIS2_waves']
+        
+        # Station indices
+        data_dic['VIS2_sta_idx_0'] = np.repeat(V2_sta_idx[:, 0], n_waves)
+        data_dic['VIS2_sta_idx_1'] = np.repeat(V2_sta_idx[:, 1], n_waves)
+        
+        # Telescope name mapping
+        tel_names = hdul['OI_ARRAY'].data['TEL_NAME']
+        station_indices = hdul['OI_ARRAY'].data['STA_INDEX']
+        station_to_name = dict(zip(station_indices, tel_names))
+        
+        # Vectorized telescope name assignment
+        data_dic['VIS2_tel_name_0'] = np.array([station_to_name[idx] for idx in data_dic['VIS2_sta_idx_0']])
+        data_dic['VIS2_tel_name_1'] = np.array([station_to_name[idx] for idx in data_dic['VIS2_sta_idx_1']])
+        
+        # Telescope information
+        data_dic['TEL_type'] = 'UT' if 'U' in header.get('TELESCOP', '') else 'AT'
+        data_dic['Telescopes'] = np.unique(V2_sta_idx)
+        
+        # === CLOSURE PHASE DATA PROCESSING ===
+        if 'OI_T3' in hdul_content:
+            print('Loading closure phase data...')
+            t3_data = hdul['OI_T3'].data
+            T3_phi = t3_data['T3PHI']
+            T3_err = t3_data['T3PHIERR']
+
+            # UV coordinates
+            U1, V1 = t3_data['U1COORD'], t3_data['V1COORD']
+            U2, V2 = t3_data['U2COORD'], t3_data['V2COORD']
+            U3, V3 = -(U1 + U2), -(V1 + V2)
+            
+            n_triangles = len(U1)
+            
+            # Vectorized T3 data processing
+            data_dic['T3_PHI'] = T3_phi.ravel()
+            data_dic['T3_PHI_err'] = T3_err.ravel()
+            data_dic['T3_waves'] = np.tile(wavelengths, n_triangles)
+            data_dic['INS_T3'] = np.repeat('PIONIER', data_dic['T3_PHI'].shape[0])
+
+            # UV coordinates for T3
+            data_dic['U1'] = np.repeat(U1, n_waves)
+            data_dic['V1'] = np.repeat(V1, n_waves)
+            data_dic['U2'] = np.repeat(U2, n_waves)
+            data_dic['V2'] = np.repeat(V2, n_waves)
+            data_dic['U3'] = np.repeat(U3, n_waves)
+            data_dic['V3'] = np.repeat(V3, n_waves)
+            
+            # Baseline calculations for triangles
+            baselines = np.array([
+                np.sqrt(U1**2 + V1**2),
+                np.sqrt(U2**2 + V2**2), 
+                np.sqrt(U3**2 + V3**2)
+            ]).T  # Shape: (n_triangles, 3)
+            
+            data_dic['avg_base'] = np.repeat(np.mean(baselines, axis=1), n_waves)
+            data_dic['max_base'] = np.repeat(np.max(baselines, axis=1), n_waves)
+
+            # T3 station indices and telescope names
+            T3_sta_idx = t3_data['STA_INDEX']  # shape (n_triangles, 3)
+            data_dic['T3_sta_idx_0'] = np.repeat(T3_sta_idx[:, 0], n_waves)
+            data_dic['T3_sta_idx_1'] = np.repeat(T3_sta_idx[:, 1], n_waves)
+            data_dic['T3_sta_idx_2'] = np.repeat(T3_sta_idx[:, 2], n_waves)
+            data_dic['T3_tel_name_0'] = np.array([station_to_name[idx] for idx in data_dic['T3_sta_idx_0']])
+            data_dic['T3_tel_name_1'] = np.array([station_to_name[idx] for idx in data_dic['T3_sta_idx_1']])
+            data_dic['T3_tel_name_2'] = np.array([station_to_name[idx] for idx in data_dic['T3_sta_idx_2']])
+        
+        return data_dic
+    
 def create_data_dic_MATISSE(hdul, N_band=False, flux_bool=False):
         """
         Creates a dictionary containing the oifits data with optimized processing.
@@ -78,10 +198,10 @@ def create_data_dic_MATISSE(hdul, N_band=False, flux_bool=False):
         -------
         data_dic : dict
             Dictionary containing the interferometric data with keys:
-            - 'Vis2', 'Vis2_err': Squared visibility and errors
-            - 'wave_vis': Wavelengths for visibility data
-            - 'u', 'v': UV coordinates
-            - 'Baselines', 'freqs': Baseline lengths and spatial frequencies
+            - 'VIS2', 'VIS2_err': Squared visibility and errors
+            - 'VIS2_waves': Wavelengths for visibility data
+            - 'Bu', 'Bv': UV coordinates
+            - 'B', 'freqs': Baseline lengths and spatial frequencies
             - 'Vis2_sta_idx_0/1', 'Vis2_tel_name_0/1': Station info
             - 'TEL_type', 'Telescopes': Telescope information
             - T3 data (if available): 'T3_PHI', 'T3_PHI_err', UV coords, etc.
@@ -114,20 +234,22 @@ def create_data_dic_MATISSE(hdul, N_band=False, flux_bool=False):
             data_dic['CorrFlux_err'] = corrflux_err.ravel()
 
         # Vectorized data expansion (much faster than loops)
-        data_dic['Vis2'] = V2.ravel()
-        data_dic['Vis2_err'] = V2_err.ravel()
-        data_dic['wave_vis'] = np.tile(wavelengths, n_baselines)
-        data_dic['INS_V2'] = np.repeat('MATISSE', data_dic['Vis2'].shape[0])
+        data_dic['VIS2'] = V2.ravel()
+        data_dic['VIS2_err'] = V2_err.ravel()
+        data_dic['VIS2_waves'] = np.tile(wavelengths, n_baselines)
+        data_dic['INS_VIS2'] = np.repeat('MATISSE', data_dic['VIS2'].shape[0])
 
         # Expand baseline coordinates
-        data_dic['u'] = np.repeat(B_u, n_waves)
-        data_dic['v'] = np.repeat(B_v, n_waves)
-        data_dic['Baselines'] = np.sqrt(data_dic['u']**2 + data_dic['v']**2)
-        data_dic['freqs'] = data_dic['Baselines'] / data_dic['wave_vis']
+        data_dic['Bu'] = np.repeat(B_u, n_waves)
+        data_dic['Bv'] = np.repeat(B_v, n_waves)
+        data_dic['B'] = np.sqrt(data_dic['Bu']**2 + data_dic['Bv']**2)
+        data_dic['freqs'] = data_dic['B'] / data_dic['VIS2_waves']
+        data_dic['u'] = data_dic['Bu'] / data_dic['VIS2_waves']
+        data_dic['v'] = data_dic['Bv'] / data_dic['VIS2_waves']
         
         # Station indices
-        data_dic['Vis2_sta_idx_0'] = np.repeat(V2_sta_idx[:, 0], n_waves)
-        data_dic['Vis2_sta_idx_1'] = np.repeat(V2_sta_idx[:, 1], n_waves)
+        data_dic['VIS2_sta_idx_0'] = np.repeat(V2_sta_idx[:, 0], n_waves)
+        data_dic['VIS2_sta_idx_1'] = np.repeat(V2_sta_idx[:, 1], n_waves)
         
         # Telescope name mapping
         tel_names = hdul['OI_ARRAY'].data['TEL_NAME']
@@ -135,8 +257,8 @@ def create_data_dic_MATISSE(hdul, N_band=False, flux_bool=False):
         station_to_name = dict(zip(station_indices, tel_names))
         
         # Vectorized telescope name assignment
-        data_dic['Vis2_tel_name_0'] = np.array([station_to_name[idx] for idx in data_dic['Vis2_sta_idx_0']])
-        data_dic['Vis2_tel_name_1'] = np.array([station_to_name[idx] for idx in data_dic['Vis2_sta_idx_1']])
+        data_dic['VIS2_tel_name_0'] = np.array([station_to_name[idx] for idx in data_dic['VIS2_sta_idx_0']])
+        data_dic['VIS2_tel_name_1'] = np.array([station_to_name[idx] for idx in data_dic['VIS2_sta_idx_1']])
         
         # Telescope information
         data_dic['TEL_type'] = 'UT' if 'U' in header.get('TELESCOP', '') else 'AT'
@@ -218,10 +340,10 @@ def create_data_dic_GRAVITY(hdul, polarization='combined', fringe_tracker=False,
     -------
     data_dic : dict
         Dictionary containing the interferometric data with keys:
-        - 'Vis2', 'Vis2_err': Squared visibility and errors
-        - 'wave_vis': Wavelengths for visibility data
-        - 'u', 'v': UV coordinates
-        - 'Baselines', 'freqs': Baseline lengths and spatial frequencies
+        - 'VIS2', 'VIS2_err': Squared visibility and errors
+        - 'VIS2_waves': Wavelengths for visibility data
+        - 'Bu', 'Bv': UV coordinates
+        - 'B', 'freqs': Baseline lengths and spatial frequencies
         - 'FLUX' (if requested and available)
     """
     
@@ -268,20 +390,22 @@ def create_data_dic_GRAVITY(hdul, polarization='combined', fringe_tracker=False,
 
     # Vectorized data expansion (optimized approach)
     data_dic = {}
-    data_dic['Vis2'] = V2.ravel()
-    data_dic['Vis2_err'] = np.abs(V2_err.ravel())
-    data_dic['wave_vis'] = np.tile(wavelengths, n_baselines)
-    data_dic['INS_V2'] = np.repeat('GRAVITY', data_dic['Vis2'].shape[0])
+    data_dic['VIS2'] = V2.ravel()
+    data_dic['VIS2_err'] = np.abs(V2_err.ravel())
+    data_dic['VIS2_waves'] = np.tile(wavelengths, n_baselines)
+    data_dic['INS_VIS2'] = np.repeat('GRAVITY', data_dic['VIS2'].shape[0])
 
     # Expand baseline coordinates efficiently
-    data_dic['u'] = np.repeat(B_u, n_waves)
-    data_dic['v'] = np.repeat(B_v, n_waves)
-    data_dic['Baselines'] = np.sqrt(data_dic['u']**2 + data_dic['v']**2)
-    data_dic['freqs'] = data_dic['Baselines'] / data_dic['wave_vis']
+    data_dic['Bu'] = np.repeat(B_u, n_waves)
+    data_dic['Bv'] = np.repeat(B_v, n_waves)
+    data_dic['B'] = np.sqrt(data_dic['Bu']**2 + data_dic['Bv']**2)
+    data_dic['freqs'] = data_dic['B'] / data_dic['VIS2_waves']
+    data_dic['u'] = data_dic['Bu'] / data_dic['VIS2_waves']
+    data_dic['v'] = data_dic['Bv'] / data_dic['VIS2_waves']
     
         # Station indices
-    data_dic['Vis2_sta_idx_0'] = np.repeat(V2_sta_idx[:, 0], n_waves)
-    data_dic['Vis2_sta_idx_1'] = np.repeat(V2_sta_idx[:, 1], n_waves)
+    data_dic['VIS2_sta_idx_0'] = np.repeat(V2_sta_idx[:, 0], n_waves)
+    data_dic['VIS2_sta_idx_1'] = np.repeat(V2_sta_idx[:, 1], n_waves)
     
     # Telescope name mapping
     tel_names = hdul['OI_ARRAY'].data['TEL_NAME']
@@ -289,8 +413,8 @@ def create_data_dic_GRAVITY(hdul, polarization='combined', fringe_tracker=False,
     station_to_name = dict(zip(station_indices, tel_names))
     
     # Vectorized telescope name assignment
-    data_dic['Vis2_tel_name_0'] = np.array([station_to_name[idx] for idx in data_dic['Vis2_sta_idx_0']])
-    data_dic['Vis2_tel_name_1'] = np.array([station_to_name[idx] for idx in data_dic['Vis2_sta_idx_1']])
+    data_dic['VIS2_tel_name_0'] = np.array([station_to_name[idx] for idx in data_dic['VIS2_sta_idx_0']])
+    data_dic['VIS2_tel_name_1'] = np.array([station_to_name[idx] for idx in data_dic['VIS2_sta_idx_1']])
     
     # Telescope information
     data_dic['TEL_type'] = 'UT' if 'U' in header.get('TELESCOP', '') else 'AT'
@@ -302,7 +426,6 @@ def create_data_dic_GRAVITY(hdul, polarization='combined', fringe_tracker=False,
         T3_phi = t3_data['T3PHI']
         T3_err = t3_data['T3PHIERR']
         
-        print(T3_phi.shape, T3_err.shape)
         # UV coordinates
         U1, V1 = t3_data['U1COORD'], t3_data['V1COORD']
         U2, V2 = t3_data['U2COORD'], t3_data['V2COORD']
@@ -313,7 +436,6 @@ def create_data_dic_GRAVITY(hdul, polarization='combined', fringe_tracker=False,
         # Vectorized T3 data processing
         data_dic['T3_PHI'] = T3_phi.ravel()
         data_dic['T3_PHI_err'] = T3_err.ravel()
-        print(T3_phi.ravel().shape, n_triangles, T3_err.ravel().shape)
         data_dic['T3_waves'] = np.tile(wavelengths, n_triangles)
         
         # UV coordinates for T3
@@ -441,19 +563,19 @@ def bin_gravity_data(data_dic, n_channels):
         Binned data dictionary
     """
     # Get unique baselines
-    unique_baselines = np.unique(data_dic['Baselines'])
+    unique_baselines = np.unique(data_dic['B'])
     
     binned_data = {
-        'Vis2': [], 'Vis2_err': [], 'wave_vis': [],
-        'u': [], 'v': [], 'Baselines': [], 'freqs': []
+        'VIS2': [], 'VIS2_err': [], 'VIS2_waves': [],
+        'Bu': [], 'Bv': [], 'B': [], 'freqs': []
     }
     
     for baseline in unique_baselines:
         # Find data for this baseline
-        baseline_idx = np.where(np.abs(data_dic['Baselines'] - baseline) < 1e-6)[0]
+        baseline_idx = np.where(np.abs(data_dic['B'] - baseline) < 1e-6)[0]
         
         # Sort by wavelength
-        wave_sort_idx = np.argsort(data_dic['wave_vis'][baseline_idx])
+        wave_sort_idx = np.argsort(data_dic['VIS2_waves'][baseline_idx])
         baseline_idx = baseline_idx[wave_sort_idx]
         
         # Calculate number of bins
@@ -464,14 +586,14 @@ def bin_gravity_data(data_dic, n_channels):
             bin_idx = baseline_idx[i*n_channels:(i+1)*n_channels]
             
             # Calculate binned values
-            binned_data['Vis2'].append(np.mean(data_dic['Vis2'][bin_idx]))
-            binned_data['Vis2_err'].append(
-                np.sqrt(np.sum(data_dic['Vis2_err'][bin_idx]**2)) / n_channels
+            binned_data['VIS2'].append(np.mean(data_dic['VIS2'][bin_idx]))
+            binned_data['VIS2_err'].append(
+                np.sqrt(np.sum(data_dic['VIS2_err'][bin_idx]**2)) / n_channels
             )
-            binned_data['wave_vis'].append(np.mean(data_dic['wave_vis'][bin_idx]))
-            binned_data['u'].append(np.mean(data_dic['u'][bin_idx]))
-            binned_data['v'].append(np.mean(data_dic['v'][bin_idx]))
-            binned_data['Baselines'].append(baseline)
+            binned_data['VIS2_waves'].append(np.mean(data_dic['VIS2_waves'][bin_idx]))
+            binned_data['Bu'].append(np.mean(data_dic['Bu'][bin_idx]))
+            binned_data['Bv'].append(np.mean(data_dic['Bv'][bin_idx]))
+            binned_data['B'].append(baseline)
             binned_data['freqs'].append(np.mean(data_dic['freqs'][bin_idx]))
     
     # Convert to numpy arrays

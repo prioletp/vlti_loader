@@ -1,1 +1,1 @@
-from . import get_gravity_observations, get_observations
+from . import VLTI_observations, oifits_utils
