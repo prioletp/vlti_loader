@@ -1,1 +1,1 @@
-from . import VLTI_observations, oifits_utils
+from .vlti_loader import Observations, utils

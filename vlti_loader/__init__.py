@@ -1,26 +1,59 @@
-#%%
 import os
 import numpy as np
 from pathlib import Path
 from astropy.io import fits
-import vlti_loader.oifits_utils as oi_utl
+from . import utils as oi_utl
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.gridspec import GridSpec
 
 class Observations:
-    def __init__(self, path_obs):
+    def __init__(self, path):
+        """Load VLTI interferometric data from one or more OIFITS files.
 
-        
-        
-        self.path_obs = path_obs
+        Parameters
+        ----------
+        path : str, Path, list, or tuple
+            Source of OIFITS data. Accepted forms:
+
+            * A path to a single ``.fits`` file.
+            * A path to a directory — all ``.fits`` files inside are loaded
+              and merged into a single data dictionary.
+            * A list or tuple of file paths, useful for combining data from
+              multiple instruments (e.g. MATISSE + GRAVITY together).
+
+        Raises
+        ------
+        FileNotFoundError
+            If the given path or any file in the list does not exist.
+        ValueError
+            If the path is a directory with no FITS files, or a file without
+            a ``.fits`` extension.
+        TypeError
+            If *path* is not a ``str``, ``Path``, ``list``, or ``tuple``.
+
+        Notes
+        -----
+        After construction, the loaded data is available via ``self.data`` (a
+        flat ``dict`` of 1-D numpy arrays) or as attribute shortcuts, e.g.
+        ``obs.VIS2``.  Use :meth:`filter_data` to restrict the data to a
+        wavelength or baseline range, and :meth:`reset_data` to undo any
+        filtering.
+
+        Examples
+        --------
+        >>> obs = Observations('/data/star.fits')
+        >>> obs = Observations('/data/MATISSE_reduced/')
+        >>> obs = Observations(['/data/MATISSE.fits', '/data/GRAVITY.fits'])
+        """
+        self.path = path
         self.data_type = None
         self.file_list = []
         
-        # Check if path_obs is an array/list
-        if isinstance(path_obs, (list, tuple, np.ndarray)):
+        # Check if path is an array/list
+        if isinstance(path, (list, tuple, np.ndarray)):
             self.data_type = 'array'
-            self.file_list = list(path_obs)
+            self.file_list = list(path)
             # Validate that all elements are valid file paths
             for file_path in self.file_list:
                 if not os.path.exists(file_path):
@@ -28,17 +61,17 @@ class Observations:
                 if not str(file_path).lower().endswith('.fits'):
                     raise ValueError(f"Non-FITS file in array: {file_path}")
         
-        # Check if path_obs is a string (file or directory path)
-        elif isinstance(path_obs, (str, Path)):
-            path_obj = Path(path_obs)
+        # Check if path is a string (file or directory path)
+        elif isinstance(path, (str, Path)):
+            path_obj = Path(path)
             
             if not path_obj.exists():
-                raise FileNotFoundError(f"Path does not exist: {path_obs}")
+                raise FileNotFoundError(f"Path does not exist: {path}")
             
             # Check if it's a FITS file
-            if path_obj.is_file() and str(path_obs).lower().endswith('.fits'):
+            if path_obj.is_file() and str(path).lower().endswith('.fits'):
                 self.data_type = 'fits_file'
-                self.file_list = [str(path_obs)]
+                self.file_list = [str(path)]
             
             # Check if it's a directory
             elif path_obj.is_dir():
@@ -46,14 +79,14 @@ class Observations:
                 # Find all FITS files in the directory
                 fits_files = list(path_obj.glob('*.fits')) + list(path_obj.glob('*.FITS'))
                 if not fits_files:
-                    raise ValueError(f"No FITS files found in directory: {path_obs}")
+                    raise ValueError(f"No FITS files found in directory: {path}")
                 self.file_list = [str(f) for f in sorted(fits_files)]
             
             else:
-                raise ValueError(f"Path is not a FITS file or directory: {path_obs}")
+                raise ValueError(f"Path is not a FITS file or directory: {path}")
         
         else:
-            raise TypeError(f"Invalid type for path_obs: {type(path_obs)}. Expected string, Path, list, or array.")
+            raise TypeError(f"Invalid type for path: {type(path)}. Expected string, Path, list, or array.")
         
         print(f"Initialized Observations with {self.data_type}: {len(self.file_list)} FITS file(s)")
 
@@ -72,6 +105,25 @@ class Observations:
         raise AttributeError(f"'Observations' object has no attribute '{name}'")
 
     def get_data(self):
+        """Read all FITS files in ``self.file_list`` and populate ``self.data``.
+
+        Detects the instrument (GRAVITY, MATISSE, PIONIER) from the FITS
+        header, dispatches to the appropriate parser in
+        ``vlti_loader.utils``, and merges all files into a single flat
+        data dictionary stored as ``self.data``.  A copy of the original data
+        is kept in ``self._raw_data`` so that :meth:`reset_data` can restore
+        the unfiltered state.
+
+        Returns
+        -------
+        dict
+            The merged data dictionary (same object as ``self.data``).
+
+        Notes
+        -----
+        This method is called automatically by :meth:`__init__` and does not
+        normally need to be called by the user.
+        """
         data_dic_array = []
         for file_path in self.file_list:
             header = oi_utl.read_header(file_path)
@@ -105,175 +157,118 @@ class Observations:
                           for k, v in self.data.items()}
         return self.data
     
-    def filter_data(self, wave_ranges=None, baseline_ranges=None, freq_ranges=None,
+    def filter_data(self,
+                   # ── Primary API ───────────────────────────────────────────
+                   wave=None, baseline=None, freq=None, vis2_err=None, cp_err=None,
+                   # ── Legacy *_ranges aliases ───────────────────────────────
+                   wave_ranges=None, baseline_ranges=None, freq_ranges=None,
                    vis2_err_ranges=None, t3_err_ranges=None,
-                   min_wave=None, max_wave=None, min_baseline=None, 
+                   # ── Legacy single-bound aliases ───────────────────────────
+                   min_wave=None, max_wave=None, min_baseline=None,
                    max_baseline=None, min_freq=None, max_freq=None,
                    min_vis2_err=None, max_vis2_err=None, min_t3_err=None, max_t3_err=None):
-        """
-        Filter data by various criteria, supporting both single ranges and multiple ranges.
-        Filters are applied to both V2 and T3 data where applicable.
-        
+        """Filter the data in-place and update ``self.data``.
+
+        Pass a ``(min, max)`` tuple (or a list of tuples for multiple disjoint
+        windows) to each parameter.  Filters are combined with AND across
+        parameters; multiple windows within one parameter are combined with OR.
+        Use :meth:`reset_data` to restore the full unfiltered dataset.
+
         Parameters
         ----------
-        wave_ranges : list of tuples, optional
-            List of (min_wave, max_wave) tuples to keep, e.g. [(2.0e-6, 2.5e-6), (3.0e-6, 4.0e-6)]
-        baseline_ranges : list of tuples, optional
-            List of (min_baseline, max_baseline) tuples to keep
-        freq_ranges : list of tuples, optional
-            List of (min_freq, max_freq) tuples to keep
-        vis2_err_ranges : list of tuples, optional
-            List of (min_vis2_err, max_vis2_err) tuples to keep for V2 error filtering
-        t3_err_ranges : list of tuples, optional
-            List of (min_t3_err, max_t3_err) tuples to keep for T3 error filtering
-        min_wave, max_wave : float, optional
-            Single wavelength range in meters (legacy support)
-        min_baseline, max_baseline : float, optional
-            Single baseline range in meters (legacy support)
-        min_freq, max_freq : float, optional
-            Single spatial frequency range in rad^-1 (legacy support)
-        min_vis2_err, max_vis2_err : float, optional
-            Single V2 error range (legacy support)
-        min_t3_err, max_t3_err : float, optional
-            Single T3 error range (legacy support)
-            
+        wave : (float, float) or list of (float, float), optional
+            Wavelength window(s) to keep in metres.
+            ``(3.2e-6, 3.8e-6)`` keeps a single band;
+            ``[(1.5e-6, 1.8e-6), (2.0e-6, 2.4e-6)]`` keeps two bands.
+        baseline : (float, float) or list of (float, float), optional
+            Projected baseline window(s) to keep in metres.
+        freq : (float, float) or list of (float, float), optional
+            Spatial-frequency window(s) to keep in rad⁻¹ (= B/λ).
+        vis2_err : (float, float) or list of (float, float), optional
+            V² uncertainty window(s) to keep.
+        cp_err : (float, float) or list of (float, float), optional
+            Closure-phase uncertainty window(s) to keep in degrees.
+        wave_ranges, baseline_ranges, freq_ranges, vis2_err_ranges, t3_err_ranges : list of (float, float), optional
+            Legacy aliases — prefer the shorthand parameters above.
+        min_wave, max_wave, min_baseline, max_baseline, min_freq, max_freq, min_vis2_err, max_vis2_err, min_t3_err, max_t3_err : float, optional
+            Legacy single-bound aliases.
+
         Returns
         -------
         dict
-            Filtered data dictionary
-            
+            The filtered data dictionary (same object as ``self.data``).
+
         Examples
         --------
-        # Filter multiple wavelength ranges
-        filtered = obs.filter_data(wave_ranges=[(2.0e-6, 2.5e-6), (3.0e-6, 4.0e-6)])
-        
-        # Filter by error ranges
-        filtered = obs.filter_data(
-            vis2_err_ranges=[(0, 0.1), (0.2, 0.3)],
-            t3_err_ranges=[(0, 5), (10, 15)]
-        )
-        
-        # Combine multiple filter types
-        filtered = obs.filter_data(
-            baseline_ranges=[(50, 100), (150, 200)],
-            vis2_err_ranges=[(0, 0.05)]
-        )
+        >>> # Single wavelength band
+        >>> obs.filter_data(wave=(3.2e-6, 3.8e-6))
+
+        >>> # Two bands + quality cuts
+        >>> obs.filter_data(
+        ...     wave=[(1.5e-6, 1.8e-6), (3.2e-6, 3.9e-6)],
+        ...     vis2_err=(0, 0.15),
+        ...     cp_err=(0, 20),
+        ... )
+
+        >>> # Baseline range
+        >>> obs.filter_data(baseline=(50, 150))
         """
+        def _resolve(shorthand, ranges, min_val, max_val):
+            """Normalise any filter form to a list of (lo, hi) tuples, or None."""
+            if shorthand is not None:
+                if isinstance(shorthand[0], (int, float)):
+                    return [tuple(shorthand)]
+                return [tuple(r) for r in shorthand]
+            if ranges is not None:
+                return list(ranges)
+            if min_val is not None or max_val is not None:
+                lo = min_val if min_val is not None else -np.inf
+                hi = max_val if max_val is not None else np.inf
+                return [(lo, hi)]
+            return None
+
+        wave_filter   = _resolve(wave,     wave_ranges,     min_wave,     max_wave)
+        base_filter   = _resolve(baseline, baseline_ranges, min_baseline, max_baseline)
+        freq_filter   = _resolve(freq,     freq_ranges,     min_freq,     max_freq)
+        v2err_filter  = _resolve(vis2_err, vis2_err_ranges, min_vis2_err, max_vis2_err)
+        cp_err_filter = _resolve(cp_err,   t3_err_ranges,   min_t3_err,   max_t3_err)
+
         data_dic = self.data
-        
-        # Helper function to apply multiple range filters
+
         def apply_range_filter(data_array, ranges):
             if ranges is None:
                 return np.ones(len(data_array), dtype=bool)
-            
-            range_idx = np.zeros(len(data_array), dtype=bool)
-            for min_val, max_val in ranges:
-                range_idx |= (data_array >= min_val) & (data_array <= max_val)
-            return range_idx
-        
+            mask = np.zeros(len(data_array), dtype=bool)
+            for lo, hi in ranges:
+                mask |= (data_array >= lo) & (data_array <= hi)
+            return mask
+
         # === FILTER V2 DATA ===
-        # Start with all indices for V2
         v2_idx = np.ones(len(data_dic['VIS2']), dtype=bool)
-        
-        # Apply wavelength filters to V2
-        if wave_ranges is not None:
-            v2_idx &= apply_range_filter(data_dic['VIS2_waves'], wave_ranges)
-        else:
-            # Legacy single range support
-            if min_wave is not None:
-                v2_idx &= (data_dic['VIS2_waves'] >= min_wave)
-            if max_wave is not None:
-                v2_idx &= (data_dic['VIS2_waves'] <= max_wave)
-        
-        # Apply baseline filters to V2
-        if baseline_ranges is not None:
-            v2_idx &= apply_range_filter(data_dic['B'], baseline_ranges)
-        else:
-            # Legacy single range support
-            if min_baseline is not None:
-                v2_idx &= (data_dic['B'] >= min_baseline)
-            if max_baseline is not None:
-                v2_idx &= (data_dic['B'] <= max_baseline)
-        
-        # Apply frequency filters to V2
-        if freq_ranges is not None:
-            v2_idx &= apply_range_filter(data_dic['freqs'], freq_ranges)
-        else:
-            # Legacy single range support
-            if min_freq is not None:
-                v2_idx &= (data_dic['freqs'] >= min_freq)
-            if max_freq is not None:
-                v2_idx &= (data_dic['freqs'] <= max_freq)
-        
-        # Apply V2 error filters
-        if vis2_err_ranges is not None:
-            v2_idx &= apply_range_filter(data_dic['VIS2_err'], vis2_err_ranges)
-        else:
-            # Legacy single range support
-            if min_vis2_err is not None:
-                v2_idx &= (data_dic['VIS2_err'] >= min_vis2_err)
-            if max_vis2_err is not None:
-                v2_idx &= (data_dic['VIS2_err'] <= max_vis2_err)
-        
-        # Create filtered dictionary for V2 data
+        v2_idx &= apply_range_filter(data_dic['VIS2_waves'], wave_filter)
+        v2_idx &= apply_range_filter(data_dic['B'],          base_filter)
+        v2_idx &= apply_range_filter(data_dic['freqs'],      freq_filter)
+        v2_idx &= apply_range_filter(data_dic['VIS2_err'],   v2err_filter)
+
         filtered_dic = {}
         v2_keys = ['VIS2', 'VIS2_err', 'VIS2_waves', 'Bu', 'Bv', 'B', 'freqs', 'u', 'v',
                    'VIS2_sta_idx_0', 'VIS2_sta_idx_1', 'VIS2_tel_name_0', 'VIS2_tel_name_1',
                    'INS_VIS2']
-        
         for key in v2_keys:
             if key in data_dic:
                 filtered_dic[key] = data_dic[key][v2_idx]
-        
+
         # === FILTER T3 DATA (if present) ===
         if 'T3_PHI' in data_dic:
-            # Start with all indices for T3
             t3_idx = np.ones(len(data_dic['T3_PHI']), dtype=bool)
-            
-            # Apply wavelength filters to T3
-            if wave_ranges is not None:
-                t3_idx &= apply_range_filter(data_dic['T3_waves'], wave_ranges)
-            else:
-                # Legacy single range support
-                if min_wave is not None:
-                    t3_idx &= (data_dic['T3_waves'] >= min_wave)
-                if max_wave is not None:
-                    t3_idx &= (data_dic['T3_waves'] <= max_wave)
-            
-            # Apply baseline filters to T3 (using max_base)
-            if baseline_ranges is not None:
-                t3_idx &= apply_range_filter(data_dic['max_base'], baseline_ranges)
-            else:
-                # Legacy single range support
-                if min_baseline is not None:
-                    t3_idx &= (data_dic['max_base'] >= min_baseline)
-                if max_baseline is not None:
-                    t3_idx &= (data_dic['max_base'] <= max_baseline)
-            
-            # Apply frequency filters to T3 (using max_base/wavelength)
+            t3_idx &= apply_range_filter(data_dic['T3_waves'], wave_filter)
+            t3_idx &= apply_range_filter(data_dic['max_base'], base_filter)
             if 'max_base' in data_dic and 'T3_waves' in data_dic:
                 t3_freqs = data_dic['max_base'] / data_dic['T3_waves']
-                if freq_ranges is not None:
-                    t3_idx &= apply_range_filter(t3_freqs, freq_ranges)
-                else:
-                    # Legacy single range support
-                    if min_freq is not None:
-                        t3_idx &= (t3_freqs >= min_freq)
-                    if max_freq is not None:
-                        t3_idx &= (t3_freqs <= max_freq)
-            
-            # Apply T3 error filters
+                t3_idx &= apply_range_filter(t3_freqs, freq_filter)
             if 'T3_PHI_err' in data_dic:
-                if t3_err_ranges is not None:
-                    t3_idx &= apply_range_filter(data_dic['T3_PHI_err'], t3_err_ranges)
-                else:
-                    # Legacy single range support
-                    if min_t3_err is not None:
-                        t3_idx &= (data_dic['T3_PHI_err'] >= min_t3_err)
-                    if max_t3_err is not None:
-                        t3_idx &= (data_dic['T3_PHI_err'] <= max_t3_err)
-            
-            # Filter T3 data
+                t3_idx &= apply_range_filter(data_dic['T3_PHI_err'], cp_err_filter)
+
             t3_keys = ['T3_PHI', 'T3_PHI_err', 'T3_waves', 'U1', 'V1', 'U2', 'V2', 'U3', 'V3',
                        'avg_base', 'max_base', 'INS_T3',
                        'T3_sta_idx_0', 'T3_sta_idx_1', 'T3_sta_idx_2',
@@ -281,7 +276,7 @@ class Observations:
             for key in t3_keys:
                 if key in data_dic:
                     filtered_dic[key] = data_dic[key][t3_idx]
-            
+
             print(f"Filtered T3 data: {np.sum(t3_idx)}/{len(t3_idx)} points kept ({np.sum(t3_idx)/len(t3_idx)*100:.1f}%)")
         
         # Copy flux data if present (flux data doesn't depend on wavelength/baseline filters)
@@ -303,14 +298,187 @@ class Observations:
         return filtered_dic
 
     def reset_data(self):
-        """Restore self.data to the original state as loaded from disk."""
+        """Restore ``self.data`` to its original state as loaded from disk.
+
+        Undoes all calls to :meth:`filter_data` and :meth:`bin_spectral_channels`
+        by replacing ``self.data`` with a fresh copy of ``self._raw_data``.
+
+        Returns
+        -------
+        dict
+            The restored data dictionary (same object as ``self.data``).
+
+        Examples
+        --------
+        >>> obs.filter_data(wave=(3.2e-6, 3.6e-6))
+        >>> obs.reset_data()   # back to full wavelength range
+        """
         self.data = {k: v.copy() if isinstance(v, np.ndarray) else v
                      for k, v in self._raw_data.items()}
         print(f"Data reset to {len(self.data['VIS2'])} VIS2 points")
         return self.data
 
+    def flag_v2(self, baselines=None, telescopes=None):
+        """Remove specific baselines from the V\u00b2 data in-place.
+
+        Only V\u00b2 data is affected; T3 data is left unchanged.
+        Use :meth:`reset_data` to undo.
+
+        Parameters
+        ----------
+        baselines : str, list of str, or list of (str, str), optional
+            Baseline pair(s) to remove (order-insensitive). Accepted forms:
+
+            * ``'AT1-AT2'`` (any non-alphanumeric separator works)
+            * ``['AT1-AT2', 'AT3-AT4']``
+            * ``[('AT1', 'AT2'), ('AT3', 'AT4')]``
+        telescopes : str or list of str, optional
+            Remove all V\u00b2 baselines that involve any of these telescopes.
+
+        Returns
+        -------
+        dict
+            The updated data dictionary (same object as ``self.data``).
+
+        Examples
+        --------
+        >>> obs.flag_v2(baselines='AT1-AT2')
+        >>> obs.flag_v2(baselines=['AT1-AT2', 'AT3-AT4'])
+        >>> obs.flag_v2(telescopes='AT1')   # all baselines involving AT1
+        """
+        import re
+        d = self.data
+
+        excluded_pairs = set()
+        if baselines is not None:
+            if isinstance(baselines, str):
+                baselines = [baselines]
+            for b in baselines:
+                if isinstance(b, str):
+                    excluded_pairs.add(frozenset(re.split(r'[^A-Za-z0-9]+', b)))
+                else:
+                    excluded_pairs.add(frozenset(b))
+
+        excluded_tels = set()
+        if telescopes is not None:
+            excluded_tels = {telescopes} if isinstance(telescopes, str) else set(telescopes)
+
+        t0 = d['VIS2_tel_name_0']
+        t1 = d['VIS2_tel_name_1']
+        v2_keep = np.ones(len(d['VIS2']), dtype=bool)
+        for pair_fs in excluded_pairs:
+            pl = list(pair_fs)
+            a, b = (pl[0], pl[1]) if len(pl) == 2 else (pl[0], pl[0])
+            v2_keep &= ~(((t0 == a) & (t1 == b)) | ((t0 == b) & (t1 == a)))
+        for tel in excluded_tels:
+            v2_keep &= ~((t0 == tel) | (t1 == tel))
+
+        v2_keys = ['VIS2', 'VIS2_err', 'VIS2_waves', 'Bu', 'Bv', 'B', 'freqs', 'u', 'v',
+                   'VIS2_sta_idx_0', 'VIS2_sta_idx_1', 'VIS2_tel_name_0', 'VIS2_tel_name_1',
+                   'INS_VIS2']
+        for key in v2_keys:
+            if key in d:
+                self.data[key] = d[key][v2_keep]
+        print(f"flag_v2: removed {(~v2_keep).sum()}/{len(v2_keep)} V\u00b2 points "
+              f"({v2_keep.sum()} kept)")
+        return self.data
+
+    def flag_t3(self, triangles=None, telescopes=None):
+        """Remove specific closure-phase triangles from the T3 data in-place.
+
+        Only T3 data is affected; V\u00b2 data is left unchanged.
+        Use :meth:`reset_data` to undo.
+
+        Parameters
+        ----------
+        triangles : str, list of str, or list of (str, str, str), optional
+            Triangle(s) to remove (order-insensitive). Accepted forms:
+
+            * ``'AT1-AT2-AT3'`` (any non-alphanumeric separator works)
+            * ``['AT1-AT2-AT3', 'AT2-AT3-AT4']``
+            * ``[('AT1', 'AT2', 'AT3')]``
+        telescopes : str or list of str, optional
+            Remove all T3 triangles that involve any of these telescopes.
+
+        Returns
+        -------
+        dict
+            The updated data dictionary (same object as ``self.data``).
+
+        Examples
+        --------
+        >>> obs.flag_t3(triangles='AT1-AT2-AT3')
+        >>> obs.flag_t3(triangles=['AT1-AT2-AT3', 'AT2-AT3-AT4'])
+        >>> obs.flag_t3(telescopes='AT1')   # all triangles involving AT1
+        """
+        import re
+        d = self.data
+
+        if 'T3_PHI' not in d:
+            print("flag_t3: no T3 data present")
+            return self.data
+
+        excluded_trips = set()
+        if triangles is not None:
+            if isinstance(triangles, str):
+                triangles = [triangles]
+            for t in triangles:
+                if isinstance(t, str):
+                    excluded_trips.add(frozenset(re.split(r'[^A-Za-z0-9]+', t)))
+                else:
+                    excluded_trips.add(frozenset(t))
+
+        excluded_tels = set()
+        if telescopes is not None:
+            excluded_tels = {telescopes} if isinstance(telescopes, str) else set(telescopes)
+
+        t3_t0 = d['T3_tel_name_0']
+        t3_t1 = d['T3_tel_name_1']
+        t3_t2 = d['T3_tel_name_2']
+        t3_keep = np.ones(len(d['T3_PHI']), dtype=bool)
+
+        for trip_fs in excluded_trips:
+            tl = list(trip_fs)
+            if len(tl) == 3:
+                a, b, c = tl
+                # A point matches if its three telescope names equal the target set
+                t3_keep &= ~(
+                    ((t3_t0 == a) | (t3_t1 == a) | (t3_t2 == a)) &
+                    ((t3_t0 == b) | (t3_t1 == b) | (t3_t2 == b)) &
+                    ((t3_t0 == c) | (t3_t1 == c) | (t3_t2 == c))
+                )
+        for tel in excluded_tels:
+            t3_keep &= ~((t3_t0 == tel) | (t3_t1 == tel) | (t3_t2 == tel))
+
+        t3_keys = ['T3_PHI', 'T3_PHI_err', 'T3_waves', 'U1', 'V1', 'U2', 'V2', 'U3', 'V3',
+                   'avg_base', 'max_base', 'INS_T3',
+                   'T3_sta_idx_0', 'T3_sta_idx_1', 'T3_sta_idx_2',
+                   'T3_tel_name_0', 'T3_tel_name_1', 'T3_tel_name_2']
+        for key in t3_keys:
+            if key in d:
+                self.data[key] = d[key][t3_keep]
+        print(f"flag_t3: removed {(~t3_keep).sum()}/{len(t3_keep)} T3 points "
+              f"({t3_keep.sum()} kept)")
+        return self.data
+
     def summary(self):
-        """Print a concise summary of the loaded data."""
+        """Print a concise summary of the currently loaded data.
+
+        Displays the number of files, instrument(s), wavelength range,
+        number of VIS2 and T3 points, baseline range, and median
+        signal-to-noise ratios for V² and closure phase.
+
+        Examples
+        --------
+        >>> obs.summary()
+        ===============================================
+          Observations Summary
+        ===============================================
+          Files          : 1
+          Instrument(s)  : MATISSE
+          Wavelengths    : 3.200 - 3.800 µm
+          ...
+        """
         d = self.data
         instruments = np.unique(d['INS_VIS2']) if 'INS_VIS2' in d else ['Unknown']
         wave_min = d['VIS2_waves'].min() * 1e6
@@ -336,7 +504,26 @@ class Observations:
         print('=' * 47)
 
     def get_effective_resolution(self):
-        """Print angular resolution lambda/B per unique baseline."""
+        """Print the effective angular resolution λ/B for every unique baseline.
+
+        For each unique projected baseline length *B* present in the data,
+        displays the minimum and maximum wavelength covered and the
+        corresponding angular resolution λ/B in milli-arcseconds (mas).
+
+        Notes
+        -----
+        The resolution is defined as λ/B, which corresponds to the fringe
+        spacing of a two-element interferometer.  The full-width at half
+        maximum of the central fringe envelope is ≈ 1.22 λ/B for a uniform
+        aperture.
+
+        Examples
+        --------
+        >>> obs.get_effective_resolution()
+             B (m)   lam_min (um)   lam_max (um)   theta_min (mas)   theta_max (mas)
+        ---------------------------------------------------------------------------
+              46.6         3.200         3.800             14.18             16.84
+        """
         d = self.data
         unique_baselines = np.unique(d['B'])
         mas = 180 * 3600 * 1000 / np.pi  # rad -> mas conversion
@@ -350,8 +537,31 @@ class Observations:
             print(f"{B:>10.1f}  {w_min*1e6:>13.3f}  {w_max*1e6:>13.3f}"
                   f"  {w_min/B*mas:>16.2f}  {w_max/B*mas:>16.2f}")
 
-    def bin_spectral_channels(self, n):
-        """Bin every n spectral channels in-place, updating self.data."""
+    def bin_spectral_channels(self, bin_size):
+        """Bin consecutive spectral channels in-place, updating ``self.data``.
+
+        For each telescope pair, wavelength-sorted channels are grouped into
+        non-overlapping bins of *bin_size* channels.  Channels that do not form a
+        complete bin at the end of a sequence are discarded.  V² is averaged;
+        V² errors are combined in quadrature (divided by *bin_size*).  The same
+        binning is applied to T3 data when present.
+
+        Parameters
+        ----------
+        bin_size : int
+            Number of spectral channels to combine into each output channel.
+            For example, ``bin_size=5`` reduces 100 channels to 20.
+
+        Returns
+        -------
+        dict
+            The updated data dictionary (same object as ``self.data``).
+
+        Examples
+        --------
+        >>> obs.bin_spectral_channels(bin_size=5)   # 5 channels → 1
+        Binned 600 → 120 VIS2 points (5× channels/bin)
+        """
         d = self.data
         pairs = np.stack([d['VIS2_sta_idx_0'], d['VIS2_sta_idx_1']], axis=1)
         unique_pairs = np.unique(pairs, axis=0)
@@ -365,10 +575,10 @@ class Observations:
         for pair in unique_pairs:
             mask = (d['VIS2_sta_idx_0'] == pair[0]) & (d['VIS2_sta_idx_1'] == pair[1])
             idx  = np.where(mask)[0][np.argsort(d['VIS2_waves'][mask])]
-            for b in range(len(idx) // n):
-                sl = idx[b*n:(b+1)*n]
+            for b in range(len(idx) // bin_size):
+                sl = idx[b*bin_size:(b+1)*bin_size]
                 out['VIS2'].append(np.mean(d['VIS2'][sl]))
-                out['VIS2_err'].append(np.sqrt(np.sum(d['VIS2_err'][sl]**2)) / n)
+                out['VIS2_err'].append(np.sqrt(np.sum(d['VIS2_err'][sl]**2)) / bin_size)
                 out['VIS2_waves'].append(np.mean(d['VIS2_waves'][sl]))
                 for k in scalar_keys:
                     out[k].append(d[k][sl[0]])
@@ -391,10 +601,10 @@ class Observations:
                 mask = ((d['T3_sta_idx_0'] == trip[0]) & (d['T3_sta_idx_1'] == trip[1]) &
                         (d['T3_sta_idx_2'] == trip[2]))
                 idx  = np.where(mask)[0][np.argsort(d['T3_waves'][mask])]
-                for b in range(len(idx) // n):
-                    sl = idx[b*n:(b+1)*n]
+                for b in range(len(idx) // bin_size):
+                    sl = idx[b*bin_size:(b+1)*bin_size]
                     t3_out['T3_PHI'].append(np.mean(d['T3_PHI'][sl]))
-                    t3_out['T3_PHI_err'].append(np.sqrt(np.sum(d['T3_PHI_err'][sl]**2)) / n)
+                    t3_out['T3_PHI_err'].append(np.sqrt(np.sum(d['T3_PHI_err'][sl]**2)) / bin_size)
                     t3_out['T3_waves'].append(np.mean(d['T3_waves'][sl]))
                     for k in t3_scalar + t3_str:
                         t3_out[k].append(d[k][sl[0]])
@@ -407,21 +617,112 @@ class Observations:
 
         n_orig = len(d['VIS2'])
         self.data = new_data
-        print(f"Binned {n_orig} \u2192 {len(new_data['VIS2'])} VIS2 points ({n}\u00d7 channels/bin)")
+        print(f"Binned {n_orig} \u2192 {len(new_data['VIS2'])} VIS2 points ({bin_size}\u00d7 channels/bin)")
         return new_data
 
+    def fit_uniform_disk(self, theta_init=1.0):
+        """Fit a uniform-disk (UD) model to the V\u00b2 data.
+
+        Uses a \u03c7\u00b2 minimisation (via ``scipy.optimize.curve_fit``) of the
+        standard UD visibility model:
+
+        .. math::
+
+            V(f) = \\frac{2\\,J_1(\\pi\\,\\theta\\,f)}{\\pi\\,\\theta\\,f}
+
+        where *f = B/\u03bb* is the spatial frequency in rad\u207b\u00b9 and \u03b8 is the
+        angular diameter in radians.  Only data points with positive
+        uncertainties are included in the fit.
+
+        Parameters
+        ----------
+        theta_init : float, optional
+            Initial guess for the angular diameter in mas.  Default is
+            ``1.0`` mas.
+
+        Returns
+        -------
+        dict
+            A result dictionary with the following keys:
+
+            * ``'theta_mas'`` \u2014 best-fit angular diameter in mas.
+            * ``'theta_err_mas'`` \u2014 1-\u03c3 uncertainty in mas.
+            * ``'chi2_red'`` \u2014 reduced \u03c7\u00b2 of the fit.
+            * ``'model_vis2'`` \u2014 model V\u00b2 evaluated at every data-point
+              spatial frequency; suitable for passing to :meth:`plot` as
+              ``model_vis2``.
+
+        Examples
+        --------
+        >>> result = obs.fit_uniform_disk(theta_init=1.0)
+        Uniform disk fit: \u03b8 = 1.234 \u00b1 0.012 mas  (\u03c7\u00b2_red = 1.05)
+        >>> fig = obs.plot(model_vis2=result['model_vis2'])
+        """
+        from scipy.special import j1
+        from scipy.optimize import curve_fit
+
+        d = self.data
+        freqs = d['freqs']
+        v2    = d['VIS2']
+        v2_err = d['VIS2_err']
+
+        mas_to_rad = np.pi / (180.0 * 3600.0 * 1000.0)
+
+        def _ud_vis2(f, theta_mas):
+            x = np.pi * theta_mas * mas_to_rad * f
+            with np.errstate(invalid='ignore', divide='ignore'):
+                vis = np.where(x == 0.0, 1.0, 2.0 * j1(x) / x)
+            return vis ** 2
+
+        valid = v2_err > 0
+        popt, pcov = curve_fit(
+            _ud_vis2, freqs[valid], v2[valid],
+            p0=[theta_init], sigma=v2_err[valid], absolute_sigma=True,
+            bounds=(0, np.inf),
+        )
+        theta_best = float(popt[0])
+        theta_err  = float(np.sqrt(pcov[0, 0]))
+
+        model_v2   = _ud_vis2(freqs, theta_best)
+        residuals  = (v2[valid] - _ud_vis2(freqs[valid], theta_best)) / v2_err[valid]
+        chi2_red   = float(np.sum(residuals ** 2) / max(valid.sum() - 1, 1))
+
+        print(f"Uniform disk fit: \u03b8 = {theta_best:.3f} \u00b1 {theta_err:.3f} mas  "
+              f"(\u03c7\u00b2_red = {chi2_red:.2f})")
+        return {
+            'theta_mas':     theta_best,
+            'theta_err_mas': theta_err,
+            'chi2_red':      chi2_red,
+            'model_vis2':    model_v2,
+        }
+
     def export_oifits(self, path):
-        """Export current (possibly filtered) data to a minimal OIFITS 2 file.
+        """Export the current (possibly filtered/binned) data to a minimal OIFITS 2 file.
+
+        Writes one ``OI_WAVELENGTH`` and one ``OI_VIS2`` binary-table extension
+        per instrument found in the data.  An ``OI_T3`` extension is written
+        when closure-phase data are present.  Wavelength channels that were
+        removed by :meth:`filter_data` are written back as flagged rows
+        (``FLAG=True``) so that the output wavelength grid remains contiguous.
 
         Parameters
         ----------
         path : str
-            Output file path (will overwrite if exists).
+            Destination file path.  An existing file at this path will be
+            overwritten.
 
         Notes
         -----
-        Target coordinates, telescope positions, and timestamps are not stored
-        in the data model and will be set to placeholder zeros.
+        * Target coordinates, telescope positions, and observation timestamps
+          are not stored in the internal data model; they are written as
+          placeholder zeros in the output file.
+        * The ``ARRNAME`` keyword is hardcoded to ``'VLTI'``.
+
+        Examples
+        --------
+        >>> obs.filter_data(wave_ranges=[(3.2e-6, 3.6e-6)])
+        >>> obs.export_oifits('/data/star_filtered.fits')
+        Exported OIFITS to /data/star_filtered.fits
         """
         from astropy.io import fits as pyfits
         d = self.data
@@ -601,34 +902,147 @@ class Observations:
         pyfits.HDUList(hdu_list).writeto(path, overwrite=True)
         print(f"Exported OIFITS to {path}")
 
-    def plot(self, uv_bool=True, model_vis2=None, model_t3=None, error_bars_v2=None, error_bars_t3=None, 
-             v2_ylim=None, cp_ylim=None, show=True):
-        """
-        Plot visibility and closure phase data.
-        
+    def plot_wavelength(self, v2_ylim=None, cp_ylim=None, show=True):
+        """Plot V\u00b2 and closure phase as a function of wavelength.
+
+        Each baseline (V\u00b2) and each maximum-baseline value (CP) is drawn as a
+        separate line colour-coded by baseline length using the ``'viridis'``
+        colourmap.  Shaded bands show \u00b11\u03c3 uncertainties.
+
         Parameters
         ----------
-        uv_bool : bool, optional
-            Whether to plot uv coverage (default: True)
-        model_vis2 : array_like, optional
-            Model visibility squared values to overlay
-        model_t3 : array_like, optional
-            Model closure phase values to overlay
-        error_bars_v2 : array_like, optional
-            Custom error bars for V2 plot
-        error_bars_t3 : array_like, optional
-            Custom error bars for CP plot
-        v2_ylim : tuple, optional
-            Y-axis limits for V2 plot as (ymin, ymax)
-        cp_ylim : tuple, optional
-            Y-axis limits for closure phase plot as (ymin, ymax)
+        v2_ylim : (float, float), optional
+            Y-axis limits for the V\u00b2 panel.
+        cp_ylim : (float, float), optional
+            Y-axis limits for the closure-phase panel in degrees.
         show : bool, optional
-            Whether to display the plot (default: True)
-            
+            Call ``plt.show()`` at the end when ``True`` (default).
+
         Returns
         -------
         matplotlib.figure.Figure
-            The created figure object
+
+        Examples
+        --------
+        >>> fig = obs.plot_wavelength(v2_ylim=(0, 1.2), cp_ylim=(-30, 30))
+        >>> fig.savefig('vis_vs_wave.pdf')
+        """
+        d = self.data
+        has_t3 = 'T3_PHI' in d
+
+        n_rows = 2 if has_t3 else 1
+        fig, axes = plt.subplots(n_rows, 1, figsize=(10, 4 * n_rows), squeeze=False)
+        ax_v2 = axes[0, 0]
+
+        B_vals = np.unique(d['B'])
+        cmap   = plt.get_cmap('viridis')
+        norm   = plt.Normalize(vmin=B_vals.min(), vmax=B_vals.max())
+
+        for B_val in B_vals:
+            mask  = d['B'] == B_val
+            w     = d['VIS2_waves'][mask] * 1e6
+            v2    = d['VIS2'][mask]
+            v2err = d['VIS2_err'][mask]
+            order = np.argsort(w)
+            w, v2, v2err = w[order], v2[order], v2err[order]
+            color = cmap(norm(B_val))
+            ax_v2.plot(w, v2, color=color, linewidth=1.2)
+            ax_v2.fill_between(w, v2 - v2err, v2 + v2err,
+                               color=color, alpha=0.2, linewidth=0)
+
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax_v2, label='Baseline (m)')
+        ax_v2.set_xlabel(r'$\lambda$ [$\mu$m]')
+        ax_v2.set_ylabel(r'$V^2$')
+        ax_v2.grid(visible=True, which='both')
+        if v2_ylim is not None:
+            ax_v2.set_ylim(*v2_ylim)
+
+        if has_t3:
+            ax_t3   = axes[1, 0]
+            B_maxes = np.unique(d['max_base'])
+            norm_t3 = plt.Normalize(vmin=B_maxes.min(), vmax=B_maxes.max())
+
+            for B_val in B_maxes:
+                mask  = d['max_base'] == B_val
+                w     = d['T3_waves'][mask] * 1e6
+                cp    = d['T3_PHI'][mask]
+                cperr = d['T3_PHI_err'][mask]
+                order = np.argsort(w)
+                w, cp, cperr = w[order], cp[order], cperr[order]
+                color = cmap(norm_t3(B_val))
+                ax_t3.plot(w, cp, color=color, linewidth=1.2)
+                ax_t3.fill_between(w, cp - cperr, cp + cperr,
+                                   color=color, alpha=0.2, linewidth=0)
+
+            sm_t3 = plt.cm.ScalarMappable(cmap=cmap, norm=norm_t3)
+            sm_t3.set_array([])
+            fig.colorbar(sm_t3, ax=ax_t3, label='Max baseline (m)')
+            ax_t3.axhline(0, color='k', linewidth=0.5, linestyle='--')
+            ax_t3.set_xlabel(r'$\lambda$ [$\mu$m]')
+            ax_t3.set_ylabel('CP [deg]')
+            ax_t3.grid(visible=True, which='both')
+            if cp_ylim is not None:
+                ax_t3.set_ylim(*cp_ylim)
+
+        fig.tight_layout()
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+        return fig
+
+    def plot(self, show_uv=True, model_vis2=None, model_t3=None, error_bars_v2=None, error_bars_t3=None,
+             v2_ylim=None, cp_ylim=None, show=True, color_by='wavelength'):
+        """Plot squared visibilities and closure phases as a function of spatial frequency.
+
+        Produces a summary figure with three panels: UV coverage (left),
+        V² vs spatial frequency (centre), and — when T3 data are present —
+        closure phase vs B_max/λ (bottom right).  Points are colour-coded by
+        wavelength using the ``'turbo'`` colourmap.
+
+        Parameters
+        ----------
+        show_uv : bool, optional
+            When ``True`` (default), include the UV-coverage panel on the
+            left side of the figure.
+        model_vis2 : array_like, optional
+            Model V² values (same length as ``self.data['VIS2']``) to overlay
+            as blue scatter points on the V² panel.
+        model_t3 : array_like, optional
+            Model closure-phase values (same length as ``self.data['T3_PHI']``)
+            to overlay as blue scatter points on the CP panel.
+        error_bars_v2 : array_like, optional
+            Custom error bars for V².  If ``None``, uses ``self.data['VIS2_err']``.
+        error_bars_t3 : array_like, optional
+            Custom error bars for CP.  If ``None``, uses ``self.data['T3_PHI_err']``.
+        v2_ylim : tuple of float, optional
+            ``(ymin, ymax)`` limits for the V² panel.
+        cp_ylim : tuple of float, optional
+            ``(ymin, ymax)`` limits for the closure-phase panel in degrees.
+        show : bool, optional
+            Call ``plt.show()`` at the end when ``True`` (default).  Pass
+            ``False`` to suppress display (e.g. when saving to file).
+        color_by : {'wavelength', 'baseline'}, optional
+            Colour scheme for data points.
+
+            * ``'wavelength'`` (default) — points are coloured by wavelength
+              using the ``'turbo'`` colourmap; a colour bar is shown.
+            * ``'baseline'`` — each telescope pair (V²) and each triangle
+              (CP) receives a distinct colour from ``'tab10'``; the UV plane
+              uses matching colours, and a legend shows the telescope names.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The figure object, which can be saved with ``fig.savefig(...)``.
+
+        Examples
+        --------
+        >>> fig = obs.plot(v2_ylim=(0, 1.2), cp_ylim=(-30, 30))
+        >>> fig = obs.plot(color_by='baseline', v2_ylim=(0, 1.2))
+        >>> fig.savefig('visibility.pdf')
         """
         data_dic = self.data
         if 'T3_PHI' in data_dic:
@@ -640,7 +1054,7 @@ class Observations:
             figsize_y = 5
             height_ratios = [1]
 
-        if uv_bool:
+        if show_uv:
             V2 = data_dic['VIS2']
             V2_err = np.array(data_dic['VIS2_err'])
 
@@ -655,92 +1069,171 @@ class Observations:
 
             gs1 = GridSpec(N_rows, 2, left=0.05, right=0.48, wspace=0.3, hspace=0.2, width_ratios=[1,2], height_ratios=height_ratios)
             ax1 = fig.add_subplot(gs1[0, 0])
-            ax2 = fig.add_subplot(gs1[0,1])
-            scatter_obs = ax2.scatter(B/waves, V2, c = waves, cmap='turbo', s=10)
-            if error_bars_v2 is None:
-                ax2.errorbar(B/waves, V2, V2_err, linestyle = '',  c='lightgrey', alpha = 0.5, zorder=0)
-            else:
-                ax2.errorbar(B/waves, V2, error_bars_v2, linestyle = '',  c='lightgrey', alpha = 0.5, zorder=0)
+            ax2 = fig.add_subplot(gs1[0, 1])
 
+            if color_by == 'baseline':
+                # ── Per-baseline / per-triangle colour mode ──────────────────────
+                pair_labels = np.array([
+                    '-'.join(sorted([a, b]))
+                    for a, b in zip(data_dic['VIS2_tel_name_0'], data_dic['VIS2_tel_name_1'])
+                ])
+                unique_pairs = np.unique(pair_labels)
+                n_pairs  = len(unique_pairs)
+                cmap_bl  = plt.get_cmap('tab10')
+                pair_color = {p: cmap_bl(i / max(n_pairs - 1, 1)) for i, p in enumerate(unique_pairs)}
+
+                for pair, color in pair_color.items():
+                    mask = pair_labels == pair
+                    err  = (V2_err if error_bars_v2 is None else np.array(error_bars_v2))[mask]
+                    ax2.scatter(B[mask] / waves[mask], V2[mask], color=color, s=10, label=pair, zorder=2)
+                    ax2.errorbar(B[mask] / waves[mask], V2[mask], err,
+                                 linestyle='', color=color, alpha=0.5, zorder=1)
+                    ax1.scatter( B_u[mask] / waves[mask],  B_v[mask] / waves[mask],
+                                color=color, s=8, alpha=0.8)
+                    ax1.scatter(-B_u[mask] / waves[mask], -B_v[mask] / waves[mask],
+                                color=color, s=8, alpha=0.8)
+
+                ax2.legend(fontsize=8, title='Baseline', loc='upper right')
+                if model_vis2 is not None:
+                    ax2.scatter(B / waves, model_vis2, marker='*', color='k', s=20, zorder=3, label='model')
+
+                if 'T3_PHI' in data_dic:
+                    B_max      = data_dic['max_base']
+                    t3_phi     = data_dic['T3_PHI']
+                    t3_phi_err = data_dic['T3_PHI_err']
+                    t3_waves   = data_dic['T3_waves']
+                    trip_labels = np.array([
+                        f"{a}-{b}-{c}"
+                        for a, b, c in zip(data_dic['T3_tel_name_0'],
+                                           data_dic['T3_tel_name_1'],
+                                           data_dic['T3_tel_name_2'])
+                    ])
+                    unique_trips = np.unique(trip_labels)
+                    n_trips = len(unique_trips)
+                    trip_color = {t: cmap_bl(i / max(n_trips - 1, 1))
+                                  for i, t in enumerate(unique_trips)}
+
+                    ax3 = fig.add_subplot(gs1[1, 1])
+                    for triplet, color in trip_color.items():
+                        mask = trip_labels == triplet
+                        err  = (t3_phi_err if error_bars_t3 is None
+                                else np.array(error_bars_t3))[mask]
+                        ax3.scatter(B_max[mask] / t3_waves[mask], t3_phi[mask],
+                                    color=color, s=10, label=triplet, zorder=2)
+                        ax3.errorbar(B_max[mask] / t3_waves[mask], t3_phi[mask], err,
+                                     linestyle='', color=color, alpha=0.5, zorder=1)
+                    ax3.legend(fontsize=7, title='Triangle', loc='upper right')
+                    ax3.grid(visible=True, which='both', axis='both')
+                    ax3.set_ylabel('CP [deg]')
+                    ax3.set_xlabel(r'${B_{max}/\lambda}$ ${[rad^{-1}]}$')
+                    if cp_ylim is not None:
+                        ax3.set_ylim(cp_ylim[0], cp_ylim[1])
+                    if model_t3 is not None:
+                        ax3.scatter(B_max / t3_waves, model_t3,
+                                    marker='*', color='k', s=20, zorder=3)
+
+            else:
+                # ── Wavelength colourmap mode (default) ─────────────────────────
+                scatter_obs = ax2.scatter(B / waves, V2, c=waves, cmap='turbo', s=10)
+                if error_bars_v2 is None:
+                    ax2.errorbar(B / waves, V2, V2_err,
+                                 linestyle='', c='lightgrey', alpha=0.5, zorder=0)
+                else:
+                    ax2.errorbar(B / waves, V2, error_bars_v2,
+                                 linestyle='', c='lightgrey', alpha=0.5, zorder=0)
+
+                divider = make_axes_locatable(ax2)
+                cax = divider.append_axes('right', size='5%', pad=0.05)
+                ax1.scatter( B_u / waves,  B_v / waves, c=waves, cmap='turbo')
+                ax1.scatter(-B_u / waves, -B_v / waves, c=waves, cmap='turbo')
+                fig.colorbar(scatter_obs, cax=cax, orientation='vertical')
+                cax.set_title(r'$\lambda$ [m]')
+
+                if model_vis2 is not None:
+                    ax2.scatter(B / waves, model_vis2, c='blue', s=10)
+
+                if 'T3_PHI' in data_dic:
+                    B_max      = data_dic['max_base']
+                    t3_phi     = data_dic['T3_PHI']
+                    t3_phi_err = data_dic['T3_PHI_err']
+                    t3_waves   = data_dic['T3_waves']
+
+                    ax3 = fig.add_subplot(gs1[1, 1])
+                    scatter_obs = ax3.scatter(B_max / t3_waves, t3_phi,
+                                             c=t3_waves, cmap='turbo', s=10)
+                    if error_bars_t3 is None:
+                        ax3.errorbar(B_max / t3_waves, t3_phi, t3_phi_err,
+                                     linestyle='', c='lightgrey', alpha=0.5, zorder=0)
+                    else:
+                        ax3.errorbar(B_max / t3_waves, t3_phi, error_bars_t3,
+                                     linestyle='', c='lightgrey', alpha=0.5, zorder=0)
+                    ax3.grid(visible=True, which='both', axis='both')
+                    ax3.set_ylabel('CP [deg]')
+                    ax3.set_xlabel(r'${B_{max}/\lambda}$ ${[rad^{-1}]}$')
+                    if cp_ylim is not None:
+                        ax3.set_ylim(cp_ylim[0], cp_ylim[1])
+                    if model_t3 is not None:
+                        ax3.scatter(B_max / t3_waves, model_t3, c='blue', s=10)
+
+            # ── Shared axis formatting ─────────────────────────────────────────
             ax2.grid(visible=True, which='both', axis='both')
             ax2.set_ylabel(r'${V^2}$')
             ax2.set_xlabel(r'f ${[rad^{-1}]}$')
-            
-            # Set V2 plot y-limits if specified
             if v2_ylim is not None:
                 ax2.set_ylim(v2_ylim[0], v2_ylim[1])
-
-            divider = make_axes_locatable(ax2)
-            cax = divider.append_axes('right', size='5%', pad=0.05)
-
-            ax1.scatter(B_u/waves, B_v/waves, c=waves, cmap='turbo')
-            ax1.scatter(-B_u/waves, -B_v/waves, c=waves, cmap='turbo')
             ax1.set_ylabel(r'v $[rad^{-1}]$')
             ax1.set_xlabel(r'u $[rad^{-1}]$')
             ax1.set_xlim(ax1.get_xlim()[::-1])
             ax1.grid(visible=True, which='major', axis='both')
 
-            fig.colorbar(scatter_obs, cax=cax, orientation='vertical')
-            cax.set_title(r'$\lambda$ [m]')
-            
-            if not model_vis2 is None:
-                ax2.scatter(B/waves, model_vis2, c = 'blue', s=10)
-            
-            if 'T3_PHI' in data_dic:
-                B_max = data_dic['max_base']
-                t3_phi = data_dic['T3_PHI']
-                t3_phi_err = data_dic['T3_PHI_err']
-                t3_waves = data_dic['T3_waves']
-                
-                ax3 = fig.add_subplot(gs1[1,1])
-                scatter_obs = ax3.scatter(B_max/t3_waves, t3_phi, c = t3_waves, cmap='turbo', s=10)
-                if error_bars_t3 is None:
-                    ax3.errorbar(B_max/t3_waves, t3_phi, t3_phi_err, linestyle = '',  c='lightgrey', alpha = 0.5, zorder=0)
-                else:
-                    ax3.errorbar(B_max/t3_waves, t3_phi, error_bars_t3, linestyle = '',  c='lightgrey', alpha = 0.5, zorder=0)
-
-                ax3.grid(visible=True, which='both', axis='both')
-                ax3.set_ylabel('CP [deg]')
-                ax3.set_xlabel(r'${B_{max}/\lambda}$ ${[rad^{-1}]}$')
-                
-                # Set CP plot y-limits if specified
-                if cp_ylim is not None:
-                    ax3.set_ylim(cp_ylim[0], cp_ylim[1])
-                
-                if not model_t3 is None:
-                    scatter_obs = ax3.scatter(B_max/t3_waves, model_t3, c = 'blue', s=10)
-            
             if show:
                 plt.show()
             else:
                 plt.close(fig)
-            
+
             return fig
         else:
             print('The option you selected is not available yet :(')
 
-    def plot_report_by_base(self, V2_min=0.6, V2_max=1.4, T3_min=-20, T3_max=20, show=True):
-        """Plots V2 vs wavelength and closure phase vs wavelength on separate subplots,
-        one per baseline / triangle. Also includes the UV-plane colored per baseline.
-        Out-of-range points are indicated with arrows. An SNR(V²) panel sits below
-        the visibility plots.
+    def plot_report_by_base(self, v2_min=0.6, v2_max=1.4, cp_min=-20, cp_max=20, show=True):
+        """Plot V² and closure phase vs wavelength, one subplot per baseline / triangle.
+
+        Produces a multi-panel diagnostic figure organised as follows:
+
+        * **Left column** — UV-plane coloured by telescope pair.
+        * **Centre column** — One V² vs λ subplot per unique telescope pair.
+          Multiple baselines within the same pair are drawn as separate curves.
+          Out-of-range points are indicated with small arrows at the panel edge.
+        * **Right column** (T3 data only) — Closure phase vs λ, one subplot
+          per unique telescope triplet.
+        * **Bottom row** — SNR(V²) vs λ panels.
 
         Parameters
         ----------
-        V2_min : float, optional
-            Lower y-axis limit for V2, by default 0.6
-        V2_max : float, optional
-            Upper y-axis limit for V2, by default 1.4
-        T3_min : float, optional
-            Lower y-axis limit for closure phase [deg], by default -20
-        T3_max : float, optional
-            Upper y-axis limit for closure phase [deg], by default 20
+        v2_min : float or None, optional
+            Lower y-axis limit for V² panels, by default ``0.6``.  Pass
+            ``None`` together with *v2_max=None* to auto-scale.
+        v2_max : float or None, optional
+            Upper y-axis limit for V² panels, by default ``1.4``.
+        cp_min : float or None, optional
+            Lower y-axis limit for closure-phase panels in degrees, by default
+            ``-20``.  Pass ``None`` together with *cp_max=None* to auto-scale.
+        cp_max : float or None, optional
+            Upper y-axis limit for closure-phase panels in degrees, by default
+            ``20``.
         show : bool, optional
-            Whether to display the figure, by default True
+            Call ``plt.show()`` at the end when ``True`` (default).  Pass
+            ``False`` to suppress display (e.g. when saving to file).
 
         Returns
         -------
-        fig : matplotlib.figure.Figure
+        matplotlib.figure.Figure
+            The figure object.
+
+        Examples
+        --------
+        >>> fig = obs.plot_report_by_base(v2_min=0, v2_max=1.2, cp_min=-30, cp_max=30)
+        >>> fig.savefig('report.pdf', bbox_inches='tight')
         """
         data_dic = self.data
         has_t3 = 'T3_PHI' in data_dic
@@ -831,8 +1324,8 @@ class Observations:
             ax = fig.add_subplot(gs_v2[i, 0])
 
             # Determine y-limits from all data for this pair
-            if V2_min is not None and V2_max is not None:
-                V2_min_lim, V2_max_lim = V2_min, V2_max
+            if v2_min is not None and v2_max is not None:
+                V2_min_lim, V2_max_lim = v2_min, v2_max
             else:
                 V2_min_lim = np.min((V2 - V2_err)[pair_mask])
                 V2_max_lim = np.max((V2 + V2_err)[pair_mask])
@@ -925,8 +1418,8 @@ class Observations:
                 ax = fig.add_subplot(gs_right[j, 0])
 
                 # Determine y-limits from all data for this triplet
-                if T3_min is not None and T3_max is not None:
-                    T3_min_lim, T3_max_lim = T3_min, T3_max
+                if cp_min is not None and cp_max is not None:
+                    T3_min_lim, T3_max_lim = cp_min, cp_max
                 else:
                     T3_min_lim = np.min((t3_phi - t3_phi_err)[triplet_mask])
                     T3_max_lim = np.max((t3_phi + t3_phi_err)[triplet_mask])
@@ -975,51 +1468,4 @@ class Observations:
 
         return fig
 
-if __name__=='__main__':
-    # path_obs_MAT = '/Users/prioletp/PhD/ESO_visitor_program/MATISSE_data/HD113766/HD113766_2024_03_29/MERGED/2024-03-29T014654_HD__113766A_U1U2U3U4_IR-LM_LOW_noChop_cal_oifits_0.fits'
-    # path_obs_GRAV = '/Users/prioletp/PhD/ESO_visitor_program/GRAVITY_data/HD113766/HD113766_27_06_24/reduced/calibrated/calibrated/GRAVI.2025-01-28T06:33:51.886_singlescivis_singlesciviscalibrated.fits'
-    
-    
-    # path_all = '/Users/prioletp/PhD/ESO_visitor_program/MATISSE_data/HD172555/HD172555_2022_04_22'
-    # path_all = [path_obs_MAT, path_obs_GRAV]
-    path_all = '/Users/prioletp/PhD/ESO_visitor_program/MATISSE_data/HD113766/HD113766_10_03_25/MERGED/2025-03-12T033445_HD113766A_A0B2D0C1_IR-LM_LOW_noChop_cal_oifits_0.fits'#'/Users/prioletp/PhD/ESO_visitor_program/MATISSE_data/HD172555/HD172555_2022_04_22/Iter4_OIFITS/2022-04-22T094100_HD_172555_U1U2U3U4_IR-LM_LOW_IN_IN_Chop.fits'
-    # observations = Observations(path_obs_MAT)
-    # observations_GRAV = Observations(path_obs_GRAV)
-    observations = Observations(path_all)
-    wave_range = [(3.2e-6, 3.6e-6)]
-    observations.filter_data(wave_ranges=wave_range)
-    observations.plot(uv_bool=True, v2_ylim=(0, 1.4), cp_ylim=(-20, 20))
-    observations.plot_report_by_base(V2_min=None, V2_max=None, T3_min=-20, T3_max=20)
-    # V2_err = observations.data['VIS2_err'][observations.data['VIS2_err']<0]
-    # plt.plot(np.arange(0,len(V2_err), 1), V2_err)
-    # print(np.min(V2_err))
-    # observations.plot(v2_ylim=(0, 1), cp_ylim=(-50, 50))
-    #%%
-    # for elem in observations.data_dic_array:
-    #     # print(elem)
-    #     print(elem.keys())
-    data = observations.data
-    v2 = data['VIS2']
-    v2_err = data['VIS2_err']
-    baselines = data['B']
-    waves = data['VIS2_waves']
-    freqs = data['freqs']
-    for i in np.unique(baselines):
-        mask = baselines == i
-        # print(f"Baseline {i} m: {np.sum(mask)} points, V2 range: {np.min(v2[mask]):.3f} - {np.max(v2[mask]):.3f}, wavelength range: {np.min(waves[mask])*1e6:.2f} - {np.max(waves[mask])*1e6:.2f} µm, freq range: {np.min(freqs[mask]):.2e} - {np.max(freqs[mask]):.2e} rad^-1")
-        v2_masked = v2[mask]
-        v2_err_masked = v2_err[mask]
-        waves_masked = waves[mask]
-        freqs_masked = freqs[mask]
-        order  = np.argsort(waves_masked)
 
-        # plt.plot(waves_masked[order]*1e6, v2_masked[order], label=f'Baseline {i} m')
-        plt.plot(waves_masked[order], v2_masked[order], linewidth=1.2, alpha=0.9)
-        plt.fill_between(waves_masked[order], v2_masked[order] - v2_err_masked[order], v2_masked[order] + v2_err_masked[order],
-                         alpha=0.2, linewidth=0)
-        plt.legend()
-        plt.show()
-        plt.clf()
-
-
-# %%
